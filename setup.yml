@@ -1,0 +1,253 @@
+---
+- name: Setup drupal, nginx, civicrm and mysql
+  hosts: webserver
+  gather_facts: False
+  user: ubuntu
+  become: yes
+  become_method: sudo
+  vars:
+    DBpassword: "{{ dbpasswd }}"
+    server_name: "{{ servername }}"
+
+  tasks:
+     - apt_repository:
+         repo: 'ppa:certbot/certbot'
+     - name: Install apt requirements
+       apt: name={{ item }} update_cache=yes state=present
+       with_items:
+       - build-essential
+       - php7.0
+       - php7.0-cli
+       - php7.0-common
+       - php7.0-curl
+       - php7.0-fpm
+       - php7.0-gd
+       - php7.0-mysql
+       - php7.0-json
+       - php7.0-mcrypt
+       - php7.0-readline
+       - php7.0-cgi
+       - php7.0-xml
+       - php7.0-soap
+       - php-pear
+       - php7.0-dev
+       - php7.0-zip
+       - git
+       - drush
+       - python-certbot-nginx
+
+     - name: Install Nginx web server
+       apt: pkg=nginx state=present update_cache=true
+       notify:
+         - start nginx
+
+     - name: service run php7.0-fpm
+       action: service name=php7.0-fpm state=started
+
+     - name: Remove old drupal directory
+       file:
+          path: /home/ubuntu/drupal
+          state: absent
+
+     - name: Install Drupal 7
+       shell: drush dl drupal-7
+
+     - name: Rename directory drupal-7
+       command: mv /home/ubuntu/drupal-7.59 /home/ubuntu/drupal
+
+     - name: Check drupal directory exists or not on Nginx document path
+       stat: path=/usr/share/nginx/html/drupal
+       register: drupal_stat
+
+     - name: Move Drupal 7 directory to Nginx document root directory
+       command: mv /home/ubuntu/drupal /usr/share/nginx/html/
+       when: drupal_stat.stat.exists == False
+
+     - name: Set Ownership and directory permission on drupal directory
+       file:
+         dest: /usr/share/nginx/html/drupal
+         owner: www-data
+         group: ubuntu
+         mode: 0775
+         recurse: yes
+
+     - name: Change www.conf file to listen on port 9000
+       command: sed -i -e 's@^listen = /run/php/php7.0-fpm.sock@listen = 127.0.0.1:9000@' /etc/php/7.0/fpm/pool.d/www.conf
+       notify:
+         - restart php7.0-fpm
+
+     - name: Updated Nginx Conf file with domain name
+       command: sed -i -e 's@localhost@{{ server_name }}@' /etc/nginx/sites-available/default
+
+
+     - name: Copy Nginx domain conf file from local machine to remote location
+       copy: src=civicrmdrupal.conf dest=/etc/nginx/sites-available/ mode=0644
+
+     - name: Create Nginx SSL directory
+       file: path=/etc/nginx/ssl state=directory
+
+     - name: Check 2048 dhparam pem file
+       stat: path=/etc/nginx/ssl/dhparam.pem
+       register: dhparam_stat
+
+     - name: Generate 2048 dhparam pem file
+       command: openssl dhparam -out /etc/nginx/ssl/dhparam.pem 2048
+       notify: restart nginx
+       when: dhparam_stat.stat.exists == False
+
+     - name: Remove default Nginx Conf file
+       file:
+          path: /etc/nginx/sites-enabled/default
+          state: absent
+
+     - name: Check symlink to domain conf file Exist or not
+       stat: path=/etc/nginx/sites-enabled/civicrmdrupal.conf
+       register: nginx_stat
+
+
+     - name: Create symlink to domain conf file
+       file: src=/etc/nginx/sites-available/civicrmdrupal.conf dest=/etc/nginx/sites-enabled/civicrmdrupal.conf state=link
+       notify: restart nginx
+       when: nginx_stat.stat.exists == False
+
+
+     - name: Check Mysql password file
+       stat: path=/home/ubuntu/.mysqlpassword
+       register: mysql_stat
+
+
+     - name: Generate Mysql root password
+       shell: date +%s | sha256sum | base64 | head -c 15 > /home/ubuntu/.mysqlpassword
+       when: mysql_stat.stat.exists == False
+
+     - name: Mysql | Set root password
+       shell: echo "mysql-server mysql-server/root_password select $(cat /home/ubuntu/.mysqlpassword)" | sudo debconf-set-selections
+       when: mysql_stat.stat.exists == False
+
+     - name: Mysql | Set root repassword
+       shell: echo "mysql-server-5.5 mysql-server/root_password_again select $(cat /home/ubuntu/.mysqlpassword)" | sudo debconf-set-selections
+       when: mysql_stat.stat.exists == False
+
+     - name: Install Mysql Server
+       apt: pkg=mysql-server state=latest
+       notify: start mysql
+
+     - name: Create Mysql Databases and Mysql User for drupal and civicrm
+       shell: "{{item}}"
+       with_items:
+        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'create database drupaldb;'
+        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'create database civicrmdb;'
+        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'CREATE USER 'drupaluser'@'localhost' IDENTIFIED BY "{{DBpassword}}";'
+        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'CREATE USER 'civicrmuser'@'localhost' IDENTIFIED BY "{{DBpassword}}";'
+        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'GRANT ALL privileges ON drupaldb.* to drupaluser@'localhost' IDENTIFIED BY "{{DBpassword}}";'
+        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'GRANT ALL privileges ON civicrmdb.* TO civicrmuser@'localhost' IDENTIFIED BY "{{DBpassword}}";'
+        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'grant SELECT on civicrmdb.* to drupaluser@localhost identified by "{{DBpassword}}";'
+       notify: restart mysql
+       when: mysql_stat.stat.exists == False
+
+
+     - name: Set Ownership and permission for default directory
+       file: dest=/usr/share/nginx/html/drupal/sites/default owner=www-data group=ubuntu mode=0755 recurse=yes
+
+
+
+     - name: Create files directory inside drupal
+       file: path=/usr/share/nginx/html/drupal/sites/default/files state=directory owner=www-data group=ubuntu mode=0775 recurse=yes
+
+
+
+     - name: Check settings.php file exists or not
+       stat: path=/usr/share/nginx/html/drupal/sites/default/settings.php
+       register: settings_stat
+
+     - name: Copy the settings.php file
+       shell: "{{item}}"
+       with_items:
+        - cp /usr/share/nginx/html/drupal/sites/default/default.settings.php /usr/share/nginx/html/drupal/sites/default/settings.php
+        - chown www-data:ubuntu /usr/share/nginx/html/drupal/sites/default/settings.php
+        - chmod 644 /usr/share/nginx/html/drupal/sites/default/settings.php
+       when: settings_stat.stat.exists == False
+
+
+     - name: Check private directory exists or not
+       stat: path=/usr/share/nginx/html/drupal/sites/default/private
+       register: private_stat
+
+     - name: change memory_limit=128 to memory_limit =256
+       command: sed -i -e 's/memory_limit\ =\ 128M/memory_limit\ =\ 256M/' /etc/php/7.0/fpm/php.ini
+       notify:
+         - restart php7.0-fpm
+
+
+     - name: Check Drupal CiviCRM directory exists or not
+       stat: path=/usr/share/nginx/html/drupal/sites/all/modules/civicrm
+       register: civicrm_stat
+
+     - name: Download CiviCRM and move to extensions
+       get_url:
+         url: https://download.civicrm.org/civicrm-5.1.2-drupal.tar.gz
+         dest: /usr/share/nginx/html/drupal/sites/all/modules/
+         mode: 777
+       when: civicrm_stat.stat.exists == False
+
+
+     - name: Unarchive CiviCRM that is already on the remote machine
+       unarchive:
+         src: /usr/share/nginx/html/drupal/sites/all/modules/civicrm-5.1.2-drupal.tar.gz
+         dest: /usr/share/nginx/html/drupal/sites/all/modules/
+         owner: www-data
+         group: ubuntu
+         mode: 0775
+         remote_src: yes
+       when: civicrm_stat.stat.exists == False
+
+
+     - name: Remove CiviCRM archive file
+       file:
+          path: /usr/share/nginx/html/drupal/sites/all/modules/civicrm-5.1.2-drupal.tar.gz
+          state: absent
+       when: civicrm_stat.stat.exists == False
+
+
+     - name: Create Custom Extensions directory
+       file: path=/usr/share/nginx/html/drupal/sites/all/modules/civicrm/extensions state=directory owner=www-data group=ubuntu mode=0775 recurse=yes
+
+
+     - name: Set Ownership and permission for files directory
+       file: dest=/usr/share/nginx/html/drupal/sites/default/files owner=www-data group=ubuntu mode=0775 recurse=yes
+
+
+
+     - name: Setup Cron Job for CiviCRM
+       cron:
+         name: "CiviCRM Cron Job"
+         minute: "*/30"
+         hour: "*"
+         user: ubuntu
+         job: "cd /usr/share/nginx/html/drupal/sites/all/modules/civicrm/bin && php cli.php -u admin -p 8090pure100 -e Job -a execute"
+
+
+     - name: Setup Cron Job for Letsencrypt auto renew
+       cron:
+         name: "Letsencrypt auto renew Cron Job"
+         minute: "0"
+         hour: "*/12"
+         user: root
+         job: 'certbot -q renew --post-hook="/etc/init.d/nginx reload"'
+
+
+  handlers:
+   - name: start nginx
+     service: name=nginx state=started
+
+   - name: restart nginx
+     service: name=nginx state=restarted
+
+   - name: restart php7.0-fpm
+     command: /etc/init.d/php7.0-fpm restart
+
+   - name: start mysql
+     service: name=mysql enabled=yes state=started
+
+   - name: restart mysql
+     service: name=mysql enabled=yes state=restarted
