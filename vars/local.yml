@@ -1,0 +1,89 @@
+---
+
+#EC2 Instance
+instancetype: "t2.micro"
+securitygroup: "ansible-webserver"
+awsaminame: "ami-41e9c52e"
+keypairname: "sample"
+keypairfilename: "sample.pem"
+regionname: "ap-south-1"
+
+
+#sendmail
+sendmail_user: "noreply"
+
+#letsencrypt
+webroot_dir: "example.com"
+letsencrypt_webroot_path: "/var/www/{{ webroot_dir }}"
+letsencrypt_email: mail@example.com
+
+#nginx
+#nginx_worker_processes: "{{ ansible_processor_cores }}"
+domain: example.com
+domain_www: www.example.com
+resolver: 8.8.8.8
+
+#mysql
+mysql_port: "3306"
+mysql_bind_address: "127.0.0.1"
+mysql_root_password: "{{ vault_mysql_root_password }}"
+
+#drupal
+drupal_db: "drupal"
+drupal_user: "drupaluser"
+drupal_password: "{{ vault_drupal_password }}"
+drupal_docroot: "/var/www"
+drupal_version: "drupal-7.59"
+drupal_dir: "{{ domain }}"
+drupal_absolute_docroot: "{{ drupal_docroot }}/{{ domain }}"
+site_mail: "noreply@{{ domain }}"
+site_name: "{{ domain }}"
+account_mail: "mail@example.com"
+user: "admin"
+password: "{{ vault_account_password }}"
+
+
+
+#civiCRM
+rootdir: "{{ domain }}"
+civicrm_db: "civicrm"
+civicrm_user: "civicrmuser"
+civicrm_password: "{{ vault_civicrm_password }}"
+#civicrm_url: "https://download.civicrm.org/civicrm-4.7.16-drupal.tar.gz?src=donate"
+civicrm_url: "https://download.civicrm.org/civicrm-5.1.2-drupal.tar.gz"
+civicrm_destination: "~/civiCRM.tar.gz"
+
+
+
+#backup  -- Backups files to AWS S3 --
+#aws_access_key: "{{ vault_aws_access_key }}"
+#aws_access_secret: "{{ vault_aws_access_secret }}"
+#region: "us-east-1"
+#s3_bucket: "backup-bucket-example"
+#s3_prefix: "test"
+#backup_name: "{{ domain }}"
+#backup_tmp_dest: "/tmp/dump"
+#cronjob_name: "drupal_backup"
+#cronjob_schedule_minute: "0"
+#cronjob_schedule_hour: "4"
+#cronjob_schedule_day: "*"
+#cronjob_schedule_month: "*"
+#cronjob_schedule_weekday: "*"
+
+
+
+
+#backup_s3
+# php_s3_lib_repo: "https://github.com/tpyo/amazon-s3-php-class"
+# machine_name: "backup_test"
+# s3_bucket_name: "test-backup-testing"
+# s3_bucket_dir: "test"
+# aws_access_key: "{{ vault_aws_access_key }}"
+# aws_access_secret: "{{ vault_aws_access_secret }}"
+# profile_name: "drupal_to_aws_s3"                                        #a simple profile name
+# backup_destination_name: "{{ machine_name }}"                           #just a destination name for the profile
+# backup_filename: "site.app"
+# backup_schedule_name: "daily"
+# cron_schedule: "0 4 * * *"                                              #executes backup every day 04:00hs
+# email_notification_backup: "noreply@site.app"
+# site_offline_message: "site.app is currently under maintenance. We should be back shortly. Thank you for your patience."

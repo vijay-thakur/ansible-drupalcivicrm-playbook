@@ -2,12 +2,14 @@
 - name: Setup drupal, nginx, civicrm and mysql
   hosts: webserver
   gather_facts: False
-  user: ubuntu
+  remote_user: ubuntu
   become: yes
   become_method: sudo
   vars:
-    DBpassword: "{{ dbpasswd }}"
-    server_name: "{{ servername }}"
+    ansible_private_key_file: ./{{ keypairfilename }}
+  vars_files:
+    - ./vars/local.yml
+    - ./vars/vault.yml
 
   tasks:
      - apt_repository:
@@ -34,188 +36,264 @@
        - php7.0-zip
        - git
        - drush
-       - python-certbot-nginx
+       - letsencrypt
+#       - python-certbot-nginx
+       - python-dev
+       - python-mysqldb
+
+
+     - name: create document root
+       file: dest=/var/www/{{ domain }} mode=755 state=directory owner=root group=www-data
+
+
+     - name: Installed letsencrypt certificate Using Nginx certbot
+       command: "letsencrypt -a standalone auth --webroot-path {{ letsencrypt_webroot_path }} -d {{ domain }} -d www.{{ domain }} -m {{ account_mail }} --agree-tos --non-interactive"
+
 
      - name: Install Nginx web server
        apt: pkg=nginx state=present update_cache=true
+       register: nginxinstalled
        notify:
          - start nginx
+
+     - name: push snippets template
+       when: nginxinstalled is success
+       copy: src=nginx/files/blockuseragents.rules dest=/etc/nginx/snippets/blockuseragents.rules mode=0640
+
+
+     - name: push site configuration template
+       when: nginxinstalled is success
+       template: src=nginx/templates/virtualhost.conf dest=/etc/nginx/sites-available/{{ domain }}.conf mode=0640
+
+
+     - name: document root permissions with recursively
+       when: nginxinstalled is success
+       file: dest=/var/www/{{ domain }} mode=755 state=directory owner=root group=www-data recurse=yes
+
+     - name: check nginx config
+       when: nginxinstalled is success
+       command: /usr/sbin/nginx -t
+       register: nginxconfig
+
+     - name: nginx config error
+       when: nginxconfig is success
+       file: dest=/etc/nginx/sites-enabled/default state=absent
+
+     - name: enable site
+       when: nginxconfig is success
+       file: src=/etc/nginx/sites-available/{{ domain }}.conf dest=/etc/nginx/sites-enabled/{{ domain }}.conf state=link
+       notify:
+         - reload nginx
+
 
      - name: service run php7.0-fpm
        action: service name=php7.0-fpm state=started
 
-     - name: Remove old drupal directory
-       file:
-          path: /home/ubuntu/drupal
-          state: absent
-
-     - name: Install Drupal 7
-       shell: drush dl drupal-7
-
-     - name: Rename directory drupal-7
-       command: mv /home/ubuntu/drupal-7.59 /home/ubuntu/drupal
-
-     - name: Check drupal directory exists or not on Nginx document path
-       stat: path=/usr/share/nginx/html/drupal
-       register: drupal_stat
-
-     - name: Move Drupal 7 directory to Nginx document root directory
-       command: mv /home/ubuntu/drupal /usr/share/nginx/html/
-       when: drupal_stat.stat.exists == False
-
-     - name: Set Ownership and directory permission on drupal directory
-       file:
-         dest: /usr/share/nginx/html/drupal
-         owner: www-data
-         group: ubuntu
-         mode: 0775
-         recurse: yes
 
      - name: Change www.conf file to listen on port 9000
        command: sed -i -e 's@^listen = /run/php/php7.0-fpm.sock@listen = 127.0.0.1:9000@' /etc/php/7.0/fpm/pool.d/www.conf
        notify:
          - restart php7.0-fpm
 
-     - name: Updated Nginx Conf file with domain name
-       command: sed -i -e 's@localhost@{{ server_name }}@' /etc/nginx/sites-available/default
-
-
-     - name: Copy Nginx domain conf file from local machine to remote location
-       copy: src=civicrmdrupal.conf dest=/etc/nginx/sites-available/ mode=0644
-
-     - name: Create Nginx SSL directory
-       file: path=/etc/nginx/ssl state=directory
-
-     - name: Check 2048 dhparam pem file
-       stat: path=/etc/nginx/ssl/dhparam.pem
-       register: dhparam_stat
-
-     - name: Generate 2048 dhparam pem file
-       command: openssl dhparam -out /etc/nginx/ssl/dhparam.pem 2048
-       notify: restart nginx
-       when: dhparam_stat.stat.exists == False
-
-     - name: Remove default Nginx Conf file
-       file:
-          path: /etc/nginx/sites-enabled/default
-          state: absent
-
-     - name: Check symlink to domain conf file Exist or not
-       stat: path=/etc/nginx/sites-enabled/civicrmdrupal.conf
-       register: nginx_stat
-
-
-     - name: Create symlink to domain conf file
-       file: src=/etc/nginx/sites-available/civicrmdrupal.conf dest=/etc/nginx/sites-enabled/civicrmdrupal.conf state=link
-       notify: restart nginx
-       when: nginx_stat.stat.exists == False
-
-
-     - name: Check Mysql password file
-       stat: path=/home/ubuntu/.mysqlpassword
-       register: mysql_stat
-
-
-     - name: Generate Mysql root password
-       shell: date +%s | sha256sum | base64 | head -c 15 > /home/ubuntu/.mysqlpassword
-       when: mysql_stat.stat.exists == False
-
      - name: Mysql | Set root password
-       shell: echo "mysql-server mysql-server/root_password select $(cat /home/ubuntu/.mysqlpassword)" | sudo debconf-set-selections
-       when: mysql_stat.stat.exists == False
+       action: raw sudo echo mysql-server mysql-server/root_password password {{ mysql_root_password }} | sudo debconf-set-selections
 
      - name: Mysql | Set root repassword
-       shell: echo "mysql-server-5.5 mysql-server/root_password_again select $(cat /home/ubuntu/.mysqlpassword)" | sudo debconf-set-selections
-       when: mysql_stat.stat.exists == False
+       action: raw sudo echo mysql-server mysql-server/root_password_again password {{ mysql_root_password }} | sudo debconf-set-selections
+
 
      - name: Install Mysql Server
        apt: pkg=mysql-server state=latest
        notify: start mysql
 
-     - name: Create Mysql Databases and Mysql User for drupal and civicrm
-       shell: "{{item}}"
+     - name: Python | Install the pip package.
+       package: name=python-pip state=latest
+
+     - name: Python | Upgrade pip.
+       shell: pip install --upgrade pip
+
+
+     - name: Create drupal database
+       mysql_db:
+         name: "{{ drupal_db }}"
+         state: present
+         login_user: root
+         login_password: "{{ mysql_root_password }}"
+       register: dbcreated
+
+
+     - name: Create a user for drupal
+       when: dbcreated is success
+       mysql_user:
+         name: "{{ drupal_user }}"
+         password: "{{ drupal_password }}"
+         priv: '{{ drupal_db }}.*:ALL'
+         state: present
+         login_user: root
+         login_password: "{{ mysql_root_password }}"
+       register: usercreated
+
+
+     - name: Failed to create drupal db
+       when: dbcreated is failed
+       fail: msg="failed to create '{{ drupal_db }}' database"
+
+
+     - name: Reload privilege tables
+       when: usercreated is success
+       command: 'mysql -u root -p{{ mysql_root_password }} -ne "{{ item }}"'
        with_items:
-        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'create database drupaldb;'
-        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'create database civicrmdb;'
-        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'CREATE USER 'drupaluser'@'localhost' IDENTIFIED BY "{{DBpassword}}";'
-        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'CREATE USER 'civicrmuser'@'localhost' IDENTIFIED BY "{{DBpassword}}";'
-        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'GRANT ALL privileges ON drupaldb.* to drupaluser@'localhost' IDENTIFIED BY "{{DBpassword}}";'
-        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'GRANT ALL privileges ON civicrmdb.* TO civicrmuser@'localhost' IDENTIFIED BY "{{DBpassword}}";'
-        - mysql -u root -p$(cat /home/ubuntu/.mysqlpassword) -e 'grant SELECT on civicrmdb.* to drupaluser@localhost identified by "{{DBpassword}}";'
+         - FLUSH PRIVILEGES
+
+
+     - name: Failed to create drupal user
+       when: usercreated is failed
+       fail: msg="Failed to create '{{ drupal_user }}' user"
+
+
+     - name: Make Sure document root exists
+       file: dest={{ drupal_docroot }} mode=750 state=directory owner=root group=www-data recurse=yes
+       register: docrootexist
+
+
+     - name: Download {{ drupal_version }}
+       when: docrootexist is success
+       command: "drush dl '{{ drupal_version }}' --destination='{{ drupal_docroot }}' --drupal-project-rename='{{ drupal_dir }}' -y"
+       register: drupaldownloaded
+
+
+     - name: Setup {{ drupal_version }}
+       when: drupaldownloaded is success
+       command: drush site-install --yes standard --root={{ drupal_absolute_docroot }} --account-name={{ user }} --account-pass={{ password }} --db-url=mysql://{{ drupal_user }}:'{{ drupal_password }}'@localhost/{{ drupal_db }} --account-mail={{ account_mail }} --site-name={{ site_name }} --site-mail={{ site_mail }}
+       register: drupalinstalled
+
+
+     - name: Setup views3 module
+       when: drupalinstalled is success
+       command: "drush pm-enable --root={{ drupal_absolute_docroot }} --yes admin ctools views views_ui args"
+       register: views3installed
+
+
+     - name: Download {{ drupal_version }} failed
+       when: drupaldownloaded is failed
+       fail: msg="couldn't Download {{ drupal_version }}"
+
+
+
+     - name: Setup {{ drupal_version }} failed
+       when: drupalinstalled is failed
+       fail: msg="couldn't install {{ drupal_version }}"
+
+
+     - name: Views3 module failed
+       when: views3installed is failed
+       fail: msg="couldn't install views3"
+
+
+     - name: Ensure private directory exists
+       file: dest={{ drupal_absolute_docroot }}/sites/default/files/private mode=770 state=directory owner=root group=www-data recurse=yes
+
+# set dir_permissions
+     - include: permissions/tasks/main.yml
+
+
+     - name: Create civicrm database
+       mysql_db:
+         name: "{{ civicrm_db }}"
+         state: present
+         login_user: root
+         login_password: "{{ mysql_root_password }}"
+       register: dbcreated
        notify: restart mysql
-       when: mysql_stat.stat.exists == False
 
 
-     - name: Set Ownership and permission for default directory
-       file: dest=/usr/share/nginx/html/drupal/sites/default owner=www-data group=ubuntu mode=0755 recurse=yes
+     - name: Create a user for civicrm && grant permissions
+       when: dbcreated is success
+       mysql_user:
+         name: "{{ civicrm_user }}"
+         password: "{{ civicrm_password }}"
+         priv: '{{ civicrm_db }}.*:ALL'
+         state: present
+         login_user: root
+         login_password: "{{ mysql_root_password }}"
+       register: usercreated
 
 
-
-     - name: Create files directory inside drupal
-       file: path=/usr/share/nginx/html/drupal/sites/default/files state=directory owner=www-data group=ubuntu mode=0775 recurse=yes
-
-
-
-     - name: Check settings.php file exists or not
-       stat: path=/usr/share/nginx/html/drupal/sites/default/settings.php
-       register: settings_stat
-
-     - name: Copy the settings.php file
-       shell: "{{item}}"
+     - name: Reload privilege tables
+       when: usercreated is success
+       command: 'mysql -u root -p{{ mysql_root_password }} -ne "{{ item }}"'
+       no_log: True
        with_items:
-        - cp /usr/share/nginx/html/drupal/sites/default/default.settings.php /usr/share/nginx/html/drupal/sites/default/settings.php
-        - chown www-data:ubuntu /usr/share/nginx/html/drupal/sites/default/settings.php
-        - chmod 644 /usr/share/nginx/html/drupal/sites/default/settings.php
-       when: settings_stat.stat.exists == False
+         - GRANT SELECT ON {{ civicrm_db }}.* TO {{ drupal_user }}@localhost IDENTIFIED BY '{{ drupal_password }}'
+
+     - name: Reload privilege tables
+       when: usercreated is success
+       command: 'mysql -u root -p{{ mysql_root_password }} -ne "{{ item }}"'
+       with_items:
+         - FLUSH PRIVILEGES
 
 
-     - name: Check private directory exists or not
-       stat: path=/usr/share/nginx/html/drupal/sites/default/private
-       register: private_stat
+     - name: Failed to create civicrm db
+       when: dbcreated is failed
+       fail: msg="failed to create '{{ item.name }}' database"
+       with_items:
+         - "{{ databases }}"
+
+     - name: copy civicrm.drush.inc
+       copy: src=civicrm/files/civicrm.drush.inc dest=~/.drush/civicrm.drush.inc mode=640
+
+     - name: Drush clear-cache
+       command: drush cc drush
+
+     - name: Download CiviCRM for "{{ drupal_version }}"
+       get_url:
+         url: "{{ civicrm_url }}"
+         dest: "{{ civicrm_destination }}"
+         owner: "root"
+         mode: 0740
+
+
+     - name: Install CiviCRM
+       command: drush civicrm-install --dbhost={{ mysql_bind_address }} --dbname={{ civicrm_db }} --dbuser={{ civicrm_user }} --dbpass={{ civicrm_password }} --destination=/sites/all/modules --tarfile={{ civicrm_destination }} --root={{ drupal_absolute_docroot }}
+
+     - name: Delete civicrm.drush.inc from drupal instalation
+       file: path={{ drupal_absolute_docroot }}/sites/all/modules/civicrm/drupal/drush/civicrm.drush.inc state=absent
+
+     - name: Enable CiviCRM
+       command: drush pm-enable civicrm --root={{ drupal_absolute_docroot }}
+
+#copy civicrm params
+
+     - name: Copy settings.php
+       copy: src=civicrm/files/settings.php dest=/tmp mode=750 owner=root
+       tags:
+         - edit
+
+     - name: Get settings.php parameters into a var (data)
+       shell: cat /tmp/settings.php
+       register: data
+       tags:
+         - edit
+
+     - name: Insert civicrm parameters (views3 integration)
+       blockinfile:
+         dest: "{{ drupal_absolute_docroot }}/sites/default/settings.php"
+         marker: "# Custom configuration"
+         insertafter: EOF
+         block: |
+          {{ data.stdout }}
+       tags:
+         - edit
+
+# set dir_permissions
+     - include: permissions/tasks/main.yml
+
 
      - name: change memory_limit=128 to memory_limit =256
        command: sed -i -e 's/memory_limit\ =\ 128M/memory_limit\ =\ 256M/' /etc/php/7.0/fpm/php.ini
        notify:
          - restart php7.0-fpm
-
-
-     - name: Check Drupal CiviCRM directory exists or not
-       stat: path=/usr/share/nginx/html/drupal/sites/all/modules/civicrm
-       register: civicrm_stat
-
-     - name: Download CiviCRM and move to extensions
-       get_url:
-         url: https://download.civicrm.org/civicrm-5.1.2-drupal.tar.gz
-         dest: /usr/share/nginx/html/drupal/sites/all/modules/
-         mode: 777
-       when: civicrm_stat.stat.exists == False
-
-
-     - name: Unarchive CiviCRM that is already on the remote machine
-       unarchive:
-         src: /usr/share/nginx/html/drupal/sites/all/modules/civicrm-5.1.2-drupal.tar.gz
-         dest: /usr/share/nginx/html/drupal/sites/all/modules/
-         owner: www-data
-         group: ubuntu
-         mode: 0775
-         remote_src: yes
-       when: civicrm_stat.stat.exists == False
-
-
-     - name: Remove CiviCRM archive file
-       file:
-          path: /usr/share/nginx/html/drupal/sites/all/modules/civicrm-5.1.2-drupal.tar.gz
-          state: absent
-       when: civicrm_stat.stat.exists == False
-
-
-     - name: Create Custom Extensions directory
-       file: path=/usr/share/nginx/html/drupal/sites/all/modules/civicrm/extensions state=directory owner=www-data group=ubuntu mode=0775 recurse=yes
-
-
-     - name: Set Ownership and permission for files directory
-       file: dest=/usr/share/nginx/html/drupal/sites/default/files owner=www-data group=ubuntu mode=0775 recurse=yes
-
+         - restart nginx
 
 
      - name: Setup Cron Job for CiviCRM
@@ -224,7 +302,7 @@
          minute: "*/30"
          hour: "*"
          user: ubuntu
-         job: "cd /usr/share/nginx/html/drupal/sites/all/modules/civicrm/bin && php cli.php -u admin -p 8090pure100 -e Job -a execute"
+         job: "cd /usr/share/nginx/html/drupal/sites/all/modules/civicrm/bin && php cli.php -u admin -p {{ password }} -e Job -a execute"
 
 
      - name: Setup Cron Job for Letsencrypt auto renew
@@ -236,12 +314,23 @@
          job: 'certbot -q renew --post-hook="/etc/init.d/nginx reload"'
 
 
+     - name: Drop Table civicrm_install_carnary
+       when: dbcreated is success
+       command: 'mysql -u root -p{{ mysql_root_password }} -ne "{{ item }}"'
+       no_log: False
+       with_items:
+         - use {{ civicrm_db }}; DROP TABLE civicrm_install_canary;
+
+
   handlers:
    - name: start nginx
      service: name=nginx state=started
 
    - name: restart nginx
      service: name=nginx state=restarted
+
+   - name: reload nginx
+     service: name=nginx state=reload
 
    - name: restart php7.0-fpm
      command: /etc/init.d/php7.0-fpm restart

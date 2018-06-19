@@ -6,6 +6,8 @@
     gather_facts: False
     tags: provisioning
     # Necessary Variables for creating/provisioning the EC2 Instance
+    vars_files:
+      - ./vars/local.yml
     vars:
       instance_type: "{{ instancetype }}"
       security_group: "{{ securitygroup }}" # Change the security group name here
@@ -85,7 +87,7 @@
           ansible_host: "{{ item.public_ip }}"
           ansible_port: 22
           ansible_user: ubuntu
-          ansible_private_key_file: './"{{ keypair }}"'
+          ansible_private_key_file: ./{{ keypairfilename }}
         with_items: "{{ ec2.instances }}"
 
       - name: Install python-minimal
@@ -93,5 +95,5 @@
         raw: sudo bash -c "test -e /usr/bin/python || (apt -qqy update && apt install -qy python-minimal)"
 
 
-  - name: Import another playbook setup.yml
-    import_playbook: setup.yml
+#  - name: Import another playbook setup.yml
+#    import_playbook: setup.yml

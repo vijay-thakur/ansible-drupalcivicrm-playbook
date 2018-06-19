@@ -1,0 +1,22 @@
+map $http_user_agent $blockedagent {
+
+	default         0;
+	~*malicious     1;
+	~*bot           1;
+	~*backdoor      1;
+	~*crawler       1;
+	~*bandit        1;
+	~*curl			0;
+	~*wget			0;
+	~*aria2			0;
+	~*transmit		0;
+	~*httpie		0;
+	~*axel			0;
+	~*cliget		0;
+	~*BBBike		0;
+	~*LWP::Simple	0;
+	~*msnbot		0;
+	~*scrapbot		0;
+
+
+}

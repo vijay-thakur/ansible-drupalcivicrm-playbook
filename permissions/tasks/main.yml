@@ -1,0 +1,10 @@
+---
+
+- name: Set docroot permissions
+  file: dest='{{ drupal_absolute_docroot }}' mode=750 state=directory owner=root group=www-data recurse=yes
+
+- name: Change sites/default/files permissions
+  file: path="{{ drupal_absolute_docroot }}/sites/default/files" state=directory follow=yes owner=root group=www-data recurse=yes mode=770
+
+- name: Change settings.php permissions
+  file: path="{{ drupal_absolute_docroot }}/sites/default/settings.php" state=file owner=root group=www-data mode=750
